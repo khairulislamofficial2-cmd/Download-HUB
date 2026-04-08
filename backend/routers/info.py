@@ -8,6 +8,7 @@ Results are cached in memory for 5 minutes (TTLCache).
 
 import asyncio
 import logging
+import sys
 from typing import Optional
 
 from cachetools import TTLCache
@@ -136,12 +137,12 @@ async def test_ytdlp():
     url = "https://youtu.be/dQw4w9WgXcQ"
     try:
         proc = await asyncio.create_subprocess_exec(
-            "yt-dlp", "--dump-json", "--no-playlist", url,
+            sys.executable, "-m", "yt_dlp", "--dump-json", "--no-playlist", url,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        
+
         return {
             "stdout": stdout.decode("utf-8", errors="replace"),
             "stderr": stderr.decode("utf-8", errors="replace"),

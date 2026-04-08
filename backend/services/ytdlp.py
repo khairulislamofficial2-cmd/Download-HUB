@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 from typing import AsyncIterator, Callable
 
@@ -20,6 +21,44 @@ logger = logging.getLogger("mediasave.ytdlp")
 TEMP_DIR = os.getenv("TEMP_DIR", "/tmp/video-downloader")
 YTDLP_RATE_LIMIT = os.getenv("YTDLP_RATE_LIMIT", "5M")
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "2048"))
+
+
+def _find_ffmpeg_executable() -> str | None:
+    """Find ffmpeg on PATH or fall back to imageio-ffmpeg bundled binary."""
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+
+        ffmpeg_path = get_ffmpeg_exe()
+        if ffmpeg_path and os.path.exists(ffmpeg_path):
+            return ffmpeg_path
+    except Exception:
+        pass
+
+    return None
+
+
+def _get_yt_dlp_command() -> list[str]:
+    """Return a command list for calling yt-dlp, using module fallback if needed."""
+    if shutil.which("yt-dlp"):
+        return ["yt-dlp"]
+    return [sys.executable, "-m", "yt_dlp"]
+
+
+def _ensure_yt_dlp_available() -> None:
+    """Verify yt-dlp is installed either as an executable or as a Python module."""
+    if shutil.which("yt-dlp"):
+        return
+    try:
+        import yt_dlp  # noqa: F401
+        return
+    except ImportError:
+        raise DependencyMissingError(
+            "yt-dlp is required but not installed. Install it with: pip install yt-dlp"
+        )
 
 
 # ── Error classes ─────────────────────────────────────────────────────────────
@@ -57,11 +96,9 @@ async def fetch_video_info(url: str) -> dict:
     Raises typed exceptions for known failure modes.
     Timeout: 30 seconds.
     """
-    if not shutil.which("yt-dlp"):
-        raise DependencyMissingError("yt-dlp binary not found on PATH")
+    _ensure_yt_dlp_available()
 
-    cmd = [
-        "yt-dlp",
+    cmd = _get_yt_dlp_command() + [
         "--dump-json",
         "--no-playlist",
         "--quiet",
@@ -190,38 +227,45 @@ async def download_media(
     Returns the path to the downloaded file.
     Timeout: 10 minutes.
     """
-    if not shutil.which("yt-dlp"):
-        raise DependencyMissingError("yt-dlp binary not found on PATH")
+    _ensure_yt_dlp_available()
+    ffmpeg_path = _find_ffmpeg_executable()
 
     os.makedirs(TEMP_DIR, exist_ok=True)
     output_template = os.path.join(TEMP_DIR, f"{download_id}.%(ext)s")
 
     if media_type == "audio":
-        cmd = [
-            "yt-dlp",
+        if not ffmpeg_path:
+            raise DependencyMissingError(
+                "ffmpeg is required for audio extraction. Install ffmpeg or add imageio-ffmpeg to your environment."
+            )
+        cmd = _get_yt_dlp_command() + [
             "--format", "bestaudio",
             "--extract-audio",
             "--audio-format", "mp3",
             "--audio-quality", "0",
+            "--ffmpeg-location", ffmpeg_path,
             "--output", output_template,
             "--no-playlist",
             "--newline",           # Force progress on separate lines
             "--rate-limit", YTDLP_RATE_LIMIT,
-            url,
         ]
     else:
-        cmd = [
-            "yt-dlp",
+        cmd = _get_yt_dlp_command() + [
             "--format", f"{format_id}+bestaudio/best",
             "--merge-output-format", "mp4",
             "--output", output_template,
             "--no-playlist",
             "--newline",
             "--rate-limit", YTDLP_RATE_LIMIT,
-            url,
         ]
+        if ffmpeg_path:
+            cmd += ["--ffmpeg-location", ffmpeg_path]
+
+    cmd += [url]
 
     logger.info(f"[{download_id}] Starting download: {' '.join(cmd)}")
+
+    output_lines: list[str] = []
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -238,6 +282,7 @@ async def download_media(
                 if not line:
                     continue
 
+                output_lines.append(line)
                 logger.debug(f"[{download_id}] yt-dlp: {line}")
 
                 # Detect conversion stage
@@ -276,8 +321,12 @@ async def download_media(
     except FileNotFoundError:
         raise DependencyMissingError("yt-dlp executable not found")
 
+    output_text = "\n".join(output_lines[-50:])
     if proc.returncode != 0:
-        raise YtDlpError(f"yt-dlp exited with code {proc.returncode}")
+        message = f"yt-dlp exited with code {proc.returncode}."
+        if output_text:
+            message += f"\n\nLast output:\n{output_text}"
+        raise YtDlpError(message)
 
     # Find the output file
     ext = "mp3" if media_type == "audio" else "mp4"

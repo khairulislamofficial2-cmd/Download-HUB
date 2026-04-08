@@ -47,19 +47,36 @@ async def lifespan(app: FastAPI):
     # --- Startup ---
     logger.info("Starting MediaSave backend…")
 
-    # Ensure yt-dlp is available
-    ytdlp_path = shutil.which("yt-dlp")
-    if not ytdlp_path:
-        raise RuntimeError(
-            "yt-dlp binary not found. Install it with: pip install yt-dlp"
+    # Ensure yt-dlp is available via module or binary
+    try:
+        result = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "yt_dlp", "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-    logger.info(f"yt-dlp found at: {ytdlp_path}")
+        stdout, _ = await asyncio.wait_for(result.communicate(), timeout=5)
+        ytdlp_version = stdout.decode().strip()
+        logger.info(f"yt-dlp available via Python module: {ytdlp_version}")
+    except Exception:
+        raise RuntimeError(
+            "yt-dlp is required. Install it with: pip install yt-dlp"
+        )
 
-    # Ensure ffmpeg is available
+    # Ensure ffmpeg is available either on PATH or via imageio-ffmpeg
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
+        try:
+            from imageio_ffmpeg import get_ffmpeg_exe
+            candidate = get_ffmpeg_exe()
+            if candidate and os.path.exists(candidate):
+                ffmpeg_path = candidate
+        except Exception:
+            pass
+
+    if not ffmpeg_path:
         logger.warning(
-            "ffmpeg not found – video merging and audio conversion will fail."
+            "ffmpeg not found – video merging and audio conversion may fail. "
+            "Install ffmpeg or add imageio-ffmpeg to the backend dependencies."
         )
     else:
         logger.info(f"ffmpeg found at: {ffmpeg_path}")
@@ -137,7 +154,7 @@ async def health_check():
     ytdlp_version = "unknown"
     try:
         result = await asyncio.create_subprocess_exec(
-            "yt-dlp", "--version",
+            sys.executable, "-m", "yt_dlp", "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
